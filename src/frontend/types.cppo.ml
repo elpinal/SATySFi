@@ -486,9 +486,10 @@ and untyped_abstract_tree_main =
   | UTPatternMatch         of untyped_abstract_tree * untyped_pattern_branch list
   | UTConstructor          of constructor_name * untyped_abstract_tree
       [@printer (fun fmt (cn, u) -> Format.fprintf fmt "%s(%a)" cn pp_untyped_abstract_tree u)]
-(* -- declaration of type and module -- *)
+(* -- declaration of type, module and signature -- *)
   | UTDeclareVariantIn     of untyped_mutual_variant_cons * untyped_abstract_tree
   | UTModule               of Range.t * module_name * manual_signature option * untyped_abstract_tree * untyped_abstract_tree
+  | UTSignature            of Range.t * sig_var_name * manual_signature * untyped_abstract_tree
 (* -- implerative -- *)
   | UTLetMutableIn         of Range.t * var_name * untyped_abstract_tree * untyped_abstract_tree
   | UTSequential           of untyped_abstract_tree * untyped_abstract_tree
@@ -516,7 +517,8 @@ and manual_signature_content =
 *)
 
 and manual_signature =
-  | Sig of Range.t * manual_signature_content list
+  | Sig    of Range.t * manual_signature_content list
+  | SigVar of Range.t * module_name list * sig_var_name
 
 and untyped_itemize =
   | UTItem of untyped_abstract_tree * (untyped_itemize list)

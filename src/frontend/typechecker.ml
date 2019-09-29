@@ -911,6 +911,10 @@ let rec typecheck
       let (eA, tyA) = typecheck_iter tyenvouter utastA in
       (Module(eM, eA), tyA)
 
+  | UTSignature(rng, name, s, utastA) ->
+      let tyenvnew = Typeenv.ModuleInterpreter.add_signature pre tyenv name s rng in
+      typecheck_iter tyenvnew utastA
+
 (* ---- for lightweight command definition ---- *)
   | UTLexHorz(utastctx, utasth) ->
       let (ectx, tyctx) = typecheck_iter tyenv utastctx in

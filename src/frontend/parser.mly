@@ -328,6 +328,20 @@
       make_standard (Tok firsttk) (Ranged utastaft) (UTModule(mdlrng, mdlnm, msigopt, utastdef, utastaft))
 
 
+  let get_range_of_manual_signature = function
+    | Sig(rng, _)       -> rng
+    | SigVar(rng, _, _) -> rng
+
+  let make_sig
+      (firsttk : Range.t) (nmtk : Range.t * sig_var_name) (msig : manual_signature)
+      (utastaft : untyped_abstract_tree)
+  : untyped_abstract_tree
+  =
+    let rng = Range.unite firsttk (get_range_of_manual_signature msig) in
+    let signame = extract_name nmtk in
+      make_standard (Tok firsttk) (Ranged utastaft) (UTSignature(rng, signame, msig, utastaft))
+
+
   let rec make_list_to_itemize (lst : (Range.t * int * untyped_abstract_tree) list) =
     let contents = make_list_to_itemize_sub (UTItem((Range.dummy "itemize2", UTInputHorz([])), [])) lst 0 in
     (Range.dummy "itemize1", UTItemize(contents))
@@ -382,6 +396,7 @@
 %token <Range.t * Types.ctrlseq_name> VERTCMD
 %token <Range.t * Types.ctrlseq_name> MATHCMD
 %token <Range.t * (Types.module_name list) * Types.var_name> VARWITHMOD
+%token <Range.t * (Types.module_name list) * Types.sig_var_name> SIGWITHMOD
 %token <Range.t * (Types.module_name list) * Types.ctrlseq_name> HORZCMDWITHMOD
 %token <Range.t * (Types.module_name list) * Types.ctrlseq_name> VERTCMDWITHMOD
 %token <Range.t * (Types.module_name list) * Types.ctrlseq_name> MATHCMDWITHMOD
@@ -504,6 +519,8 @@ nxtoplevel:
   | top=TYPE; variantdec=nxvariantdec; subseq=nxtopsubseq                    { make_variant_declaration top variantdec subseq }
   | top=MODULE; mdlnmtok=CONSTRUCTOR; sigopt=nxsigopt;
       DEFEQ; STRUCT; strct=nxstruct; subseq=nxtopsubseq                      { make_module top mdlnmtok sigopt strct subseq }
+  | top=MODULE; TYPE; name=CONSTRUCTOR; DEFEQ; s=signature;
+      subseq=nxtopsubseq                                                     { make_sig top name s subseq }
   | top=OPEN; mdlnmtok=CONSTRUCTOR; subseq=nxtopsubseq {
       let (rng, mdlnm) = mdlnmtok in
       make_standard (Tok top) (Ranged subseq) (UTOpenIn(rng, mdlnm, subseq))
@@ -515,8 +532,13 @@ nxtopsubseq:
   | IN; utast=nxlet; EOI { utast }
 ;
 nxsigopt:
-  |                                                { None }
-  | COLON; top=SIG; sg=list(nxsigelem); bottom=END { Some(Sig(Range.unite top bottom, sg)) }
+  |                    { None }
+  | COLON; s=signature { Some(s) }
+;
+signature:
+  | top=SIG; sg=list(nxsigelem); bottom=END { Sig(Range.unite top bottom, sg) }
+  | tok=CONSTRUCTOR                         { let (rng, name) = tok in SigVar(rng, [], name) }
+  | tok=SIGWITHMOD                          { let (rng, names, name) = tok in SigVar(rng, names, name) }
 ;
 nxsigelem:
   | TYPE; tyvars=list(TYPEVAR); tytok=VAR; clst=constrnts       { let (_, tynm) = tytok in (SigType(kind_type_arguments tyvars clst, tynm)) }
@@ -545,6 +567,8 @@ nxstruct:
   | top=TYPE; varntdec=nxvariantdec; tail=nxstruct                   { make_variant_declaration top varntdec tail }
   | top=MODULE; tok=CONSTRUCTOR; sigopt=nxsigopt;
       DEFEQ; STRUCT; strct=nxstruct; tail=nxstruct                   { make_module top tok sigopt strct tail }
+  | top=MODULE; TYPE; name=CONSTRUCTOR; DEFEQ; s=signature;
+      tail=nxstruct                                                  { make_sig top name s tail }
   | top=OPEN; mdlnmtok=CONSTRUCTOR; tail=nxstruct {
       let (rng, mdlnm) = mdlnmtok in
       make_standard (Tok top) (Ranged tail) (UTOpenIn(rng, mdlnm, tail))

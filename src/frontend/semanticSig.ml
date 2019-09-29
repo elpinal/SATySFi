@@ -13,38 +13,23 @@ module F(X : S) = struct
     | C
     | T
     | M
+    | S
   [@@deriving eq, ord]
 
   type label = var_class * string
   [@@deriving eq, ord]
 
   let show_label (cl, s) =
-    match cl with
-    | V -> "value '" ^ s ^ "'"
-    | C -> "constructor '" ^ s ^ "'"
-    | T -> "type '" ^ s ^ "'"
-    | M -> "module '" ^ s ^ "'"
-
-  module Struct = Map.Make(struct
-    type t = label
-    [@@deriving eq, ord]
-  end)
-
-  type direct =
-    | Direct (* direct \x : ... *)
-    | Indirect (* val x : ... *)
-
-  type t =
-    | AtomicType of X.ty * X.kind
-    | AtomicTerm of {
-        is_direct : direct;
-        ty : X.poly;
-      }
-    | AtomicConstr of {
-        var : X.var; (* Represents what abstract type this constructor belongs to. *)
-        ty : X.ty; (* The type of the argument to this constructor. *)
-      }
-    | Structure of t Struct.t
+    let desc =
+      match cl with
+      | V -> "value"
+      | C -> "constructor"
+      | T -> "type"
+      | M -> "module"
+      | S -> "signature"
+    in
+    let s = "'" ^ s ^ "'" in
+      desc ^ " " ^ s
 
   type var_info = {
     v : X.var;
@@ -92,7 +77,29 @@ module F(X : S) = struct
 
   let from_body = Exist.from_body
 
-  type ex_t = t exist
+  module Struct = Map.Make(struct
+    type t = label
+    [@@deriving eq, ord]
+  end)
+
+  type direct =
+    | Direct (* direct \x : ... *)
+    | Indirect (* val x : ... *)
+
+  type t =
+    | AtomicType of X.ty * X.kind
+    | AtomicTerm of {
+        is_direct : direct;
+        ty : X.poly;
+      }
+    | AtomicConstr of {
+        var : X.var; (* Represents what abstract type this constructor belongs to. *)
+        ty : X.ty; (* The type of the argument to this constructor. *)
+      }
+    | AtomicSig of ex_t
+    | Structure of t Struct.t
+
+  and ex_t = t exist
 
   module VMap = Map.Make(struct
     type t = X.var
@@ -139,6 +146,7 @@ module F(X : S) = struct
         | AtomicType(ty, k)             -> AtomicType(subst_type tys ty, k)
         | AtomicTerm{is_direct; ty = p} -> AtomicTerm{is_direct; ty = subst_poly tys p}
         | AtomicConstr{var; ty}         -> AtomicConstr{var; ty = subst_type tys ty}
+        | AtomicSig(asig)               -> AtomicSig(Exist.map aux asig)
         | Structure(s)                  -> Structure(Struct.map aux s)
       in
         aux

@@ -249,6 +249,13 @@ rule progexpr stack = parse
           VARWITHMOD(pos, mdlnmlst, varnm)
       }
 
+  | ((constructor ".")+ constructor) {
+        let tokstr = Lexing.lexeme lexbuf in
+        let pos = get_pos lexbuf in
+        let (mdlnmlst, signm) = split_module_list tokstr in
+          SIGWITHMOD(pos, mdlnmlst, signm)
+      }
+
   | identifier {
         let tokstr = Lexing.lexeme lexbuf in
         let pos = get_pos lexbuf in

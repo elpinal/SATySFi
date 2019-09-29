@@ -80,6 +80,21 @@ type typename_to_typedef_map = (TypeID.t * type_definition) TyNameMap.t
 
 type constructor_to_def_map = (TypeID.t * type_scheme) ConstrMap.t
 
+module ModuleInterpreter_ = struct
+  module M = struct
+    type ty = type_scheme
+    type poly = poly_type
+    type kind = int
+    type var = TypeID.t
+
+    let var_compare = TypeID.compare
+  end
+
+  module SS = SemanticSig.F(M)
+end
+
+type sigvar_to_sig_map = ModuleInterpreter_.SS.ex_t SigVarMap.t
+
 module type Signature = sig
   val lookup_type_opt : type_name -> (TypeID.t * type_definition) option
   val lookup_var_opt : var_name -> poly_type option
@@ -87,20 +102,17 @@ module type Signature = sig
   val fold_type : (type_name -> TypeID.t * type_definition -> 'a -> 'a) -> 'a -> 'a
   val fold_var : (var_name -> poly_type -> 'a -> 'a) -> 'a -> 'a
   val fold_constr : (constructor_name -> TypeID.t * type_scheme -> 'a -> 'a) -> 'a -> 'a
+  val fold_sig : (sig_var_name -> ModuleInterpreter_.SS.ex_t -> 'a -> 'a) -> 'a -> 'a
 end
 
 type signature = (module Signature)
-
-type sigvar_to_sig_map = signature SigVarMap.t
-
-type current_address = ModuleID.t Alist.t
 
 type single_stage =
   {
     vmap : var_to_vardef_map;
     tmap : typename_to_typedef_map;
     cmap : constructor_to_def_map;
-    (* smap : sigvar_to_sig_map; *)
+    smap : sigvar_to_sig_map;
     sopt : signature option;
   }
 
@@ -109,9 +121,12 @@ module SingleStage = struct
     vmap = VarMap.empty;
     tmap = TyNameMap.empty;
     cmap = ConstrMap.empty;
+    smap = SigVarMap.empty;
     sopt = None;
   }
 end
+
+type current_address = ModuleID.t Alist.t
 
 type t =
   {
@@ -148,6 +163,10 @@ let update_td (tdf : typename_to_typedef_map -> typename_to_typedef_map) (stage 
 
 let update_cd (cdf : constructor_to_def_map -> constructor_to_def_map) (stage : single_stage) : single_stage =
   { stage with cmap = cdf stage.cmap }
+
+
+let update_sd (sdf : sigvar_to_sig_map -> sigvar_to_sig_map) (stage : single_stage) : single_stage =
+  { stage with smap = sdf stage.smap }
 
 
 let update_so (sof : signature option -> signature option) (stage : single_stage) : single_stage =
@@ -287,6 +306,7 @@ let open_module (tyenv : t) (rng : Range.t) (mdlnm : module_name) =
           let module M = (val s) in
           ModuleTree.update mtr addrlst (update_td (M.fold_type TyNameMap.add)) >>= fun mtr ->
           ModuleTree.update mtr addrlst (update_cd (M.fold_constr ConstrMap.add)) >>= fun mtr ->
+          ModuleTree.update mtr addrlst (update_sd (M.fold_sig SigVarMap.add)) >>= fun mtr ->
           ModuleTree.update mtr addrlst (update_vt @@
             M.fold_var (fun varnm pty vdmapU ->
               match stage.vmap |> VarMap.find_opt varnm with
@@ -303,7 +323,8 @@ let open_module (tyenv : t) (rng : Range.t) (mdlnm : module_name) =
         (* -- if the opened module does NOT have a signature -- *)
           ModuleTree.update mtr addrlst (update_td (TyNameMap.fold TyNameMap.add stage.tmap)) >>= fun mtr ->
           ModuleTree.update mtr addrlst (update_vt (VarMap.fold VarMap.add stage.vmap)) >>= fun mtr ->
-          ModuleTree.update mtr addrlst (update_cd (ConstrMap.fold ConstrMap.add stage.cmap))
+          ModuleTree.update mtr addrlst (update_cd (ConstrMap.fold ConstrMap.add stage.cmap)) >>= fun mtr ->
+          ModuleTree.update mtr addrlst (update_sd (SigVarMap.fold SigVarMap.add stage.smap))
     )
   in
     match mtropt with
@@ -1218,26 +1239,32 @@ let reflects (Poly(pty1) : poly_type) (Poly(pty2) : poly_type) : bool =
   b
 
 
+let find_signature tyenv (names : module_name list) (name : sig_var_name) rng =
+  let nmtoid = tyenv.name_to_id_map in
+  let mtr = tyenv.main_tree in
+  let addr =
+    names |> List.map (fun name ->
+      match nmtoid |> ModuleNameMap.find_opt name with
+      | None     -> raise (UndefinedModuleName(rng, name, get_candidates ModuleNameMap.fold nmtoid name))
+      | Some(id) -> id
+    )
+  in
+  ModuleTree.search_backward mtr (Alist.to_list tyenv.current_address) addr (fun stage -> SigVarMap.find_opt name stage.smap)
+
+
 module ModuleInterpreter = struct
-  module M = struct
-    type ty = type_scheme
-    type poly = poly_type
-    type kind = int
-    type var = TypeID.t
+  include ModuleInterpreter_
 
-    let var_compare = TypeID.compare
-  end
-
-  module SS = SemanticSig.F(M)
   module Struct = SS.Struct
   module VMap = SS.VMap
 
-  exception DuplicateSpec           of Range.t * SS.label
-  exception ValueSpecMismatch       of Range.t * SS.label list * t * poly_type * poly_type
-  exception ArityMismatch           of Range.t * SS.label list * int * int
-  exception TypeMismatch            of t * poly_type * poly_type
-  exception MissingImplementation   of Range.t * SS.label
-  exception NotProvidingRealization of Range.t * SS.label list * SS.label
+  exception DuplicateSpec              of Range.t * SS.label
+  exception ValueSpecMismatch          of Range.t * SS.label list * t * poly_type * poly_type
+  exception ArityMismatch              of Range.t * SS.label list * int * int
+  exception TypeMismatch               of t * poly_type * poly_type
+  exception MissingImplementation      of Range.t * SS.label
+  exception NotProvidingRealization    of Range.t * SS.label list * SS.label
+  exception UndefinedSignatureVariable of Range.t * module_name list * sig_var_name
 
   let get_kind (ids, _) = List.length ids
 
@@ -1266,42 +1293,58 @@ module ModuleInterpreter = struct
           let asig = interpret_type_def (SS.T, l) tid d in
           let () = quantifiers := SS.Exist.get_quantifier asig @ (!quantifiers) in
           Struct.add (SS.T, l) (SS.Exist.get_body asig)
-          ) stage.tmap |> fun m ->
+          ) stage.tmap |>
+        SigVarMap.fold (fun l asig -> Struct.add (SS.S, l) (SS.AtomicSig(asig))) stage.smap |> fun m ->
         SS.Structure(m) |> SS.Exist.quantify (!quantifiers)
 
   let interpret_type pre tyenv mty c =
     let mono = fix_manual_type_free { pre with level = Level.succ pre.level; } tyenv mty c in
     generalize pre.level mono
 
-  let from_manual pre tyenv (Sig(rng, msig)) =
-    let tyenv_acc = ref tyenv in
-    let f : manual_signature_content -> (Struct.key * SS.t) SS.exist = function
-      | SigType(args, name) ->
-          let new_id = TypeID.fresh (get_moduled_type_name tyenv name) in
-          let k = List.length args in
-          let var = {SS.v = new_id; k ; location = [SS.T, name]} in
-          let bids = List.map (fun _ -> BoundID.fresh UniversalKind ()) args in
-          let xs = List.map (fun bid -> (Range.dummy "type-spec", TypeVariable(PolyBound(bid)))) bids in
-          let scheme = (bids, Poly(Range.dummy "abstract-type", VariantType(xs, new_id))) in
-          let ty = SS.AtomicType(scheme, k) in
-          let tyid = TypeID.fresh (get_moduled_type_name tyenv name) in
-          let () = tyenv_acc := add_type_definition (!tyenv_acc) name (tyid, Alias(scheme)) in
-          SS.Exist.quantify1 var ((SS.T, name), ty)
-      | SigValue(name, mty, c) ->
-          ((SS.V, name), SS.AtomicTerm{is_direct = SS.Indirect; ty = interpret_type pre (!tyenv_acc) mty c}) |> SS.from_body
-      | SigDirect(name, mty, c) ->
-          ((SS.V, name), SS.AtomicTerm{is_direct = SS.Direct; ty = interpret_type pre (!tyenv_acc) mty c}) |> SS.from_body
-    in
-    let update m (l, s) =
-      let u = function
-        | None    -> Some(s)
-        | Some(_) -> raise (DuplicateSpec(rng, l))
-      in
-      Struct.update l u m
-    in
-    let g e spec = SS.Exist.merge update e (f spec)
-    in
-      List.fold_left g (SS.from_body Struct.empty) msig |> SS.Exist.map (fun x -> SS.Structure(x))
+  let from_manual pre tyenv = function
+    | Sig(rng, msig) ->
+        let tyenv_acc = ref tyenv in
+        let f : manual_signature_content -> (Struct.key * SS.t) SS.exist = function
+          | SigType(args, name) ->
+              let new_id = TypeID.fresh (get_moduled_type_name tyenv name) in
+              let k = List.length args in
+              let var = {SS.v = new_id; k ; location = [SS.T, name]} in
+              let bids = List.map (fun _ -> BoundID.fresh UniversalKind ()) args in
+              let xs = List.map (fun bid -> (Range.dummy "type-spec", TypeVariable(PolyBound(bid)))) bids in
+              let scheme = (bids, Poly(Range.dummy "abstract-type", VariantType(xs, new_id))) in
+              let ty = SS.AtomicType(scheme, k) in
+              let tyid = TypeID.fresh (get_moduled_type_name tyenv name) in
+              let () = tyenv_acc := add_type_definition (!tyenv_acc) name (tyid, Alias(scheme)) in
+              SS.Exist.quantify1 var ((SS.T, name), ty)
+          | SigValue(name, mty, c) ->
+              ((SS.V, name), SS.AtomicTerm{is_direct = SS.Indirect; ty = interpret_type pre (!tyenv_acc) mty c}) |> SS.from_body
+          | SigDirect(name, mty, c) ->
+              ((SS.V, name), SS.AtomicTerm{is_direct = SS.Direct; ty = interpret_type pre (!tyenv_acc) mty c}) |> SS.from_body
+        in
+        let update m (l, s) =
+          let u = function
+            | None    -> Some(s)
+            | Some(_) -> raise (DuplicateSpec(rng, l))
+          in
+          Struct.update l u m
+        in
+        let g e spec = SS.Exist.merge update e (f spec)
+        in
+          List.fold_left g (SS.from_body Struct.empty) msig |> SS.Exist.map (fun x -> SS.Structure(x))
+    | SigVar(rng, names, name) ->
+        match find_signature tyenv names name rng with
+        | None       -> raise (UndefinedSignatureVariable(rng, names, name))
+        | Some(asig) -> asig
+
+
+  let add_signature pre tyenv name s rng =
+    let asig = from_manual pre tyenv s in
+    let addr = tyenv.current_address |> Alist.to_list in
+    let mtr = tyenv.main_tree in
+    match ModuleTree.update mtr addr (update_sd (SigVarMap.add name asig)) with
+    | None         -> assert false
+    | Some(mtrnew) -> { tyenv with main_tree = mtrnew; }
+
 
   (* Checks whether 's1' is subtype of 's2'. *)
   let rec subtype_of rng location tyenv s1 s2 = match s1, s2 with
@@ -1457,6 +1500,16 @@ module ModuleInterpreter = struct
           match cl, s1 with
           | C, AtomicConstr{var = tid; ty = scheme} -> f str (tid, scheme) acc1
           | _                                       -> acc1
+        in
+        match s with
+        | Structure(s0) -> Struct.fold g s0 acc
+        | _             -> assert false
+
+      let fold_sig f acc =
+        let g (cl, str) s1 acc1 =
+          match cl, s1 with
+          | S, AtomicSig(asig) -> f str asig acc1
+          | _                  -> acc1
         in
         match s with
         | Structure(s0) -> Struct.fold g s0 acc

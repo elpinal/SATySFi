@@ -855,6 +855,13 @@ let error_log_environment suspended =
         (* NormalLine("Missing " ^ SS.show_label label); *)
       ]
 
+  | Typeenv.ModuleInterpreter.UndefinedSignatureVariable(rng, names, name) ->
+      let s = String.concat "." (List.append names [name]) in
+      report_error Typechecker [
+        NormalLine("at " ^ (Range.to_string rng) ^ ":");
+        NormalLine("undefined signature variable '" ^ s ^ "'");
+      ]
+
   | Typechecker.ContradictionError(tyenv, ((rng1, _) as ty1), ((rng2, _) as ty2)) ->
       let strty1 = string_of_mono_type tyenv ty1 in
       let strty2 = string_of_mono_type tyenv ty2 in

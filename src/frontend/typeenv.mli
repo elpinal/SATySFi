@@ -80,13 +80,15 @@ module ModuleInterpreter : sig
 
     val from_tyenv : t -> SS.ex_t
     val from_manual : pre -> t -> manual_signature -> SS.ex_t
+    val add_signature : pre -> t -> sig_var_name -> manual_signature -> Range.t -> t
 
-    exception DuplicateSpec           of Range.t * SS.label
-    exception ValueSpecMismatch       of Range.t * SS.label list * t * poly_type * poly_type
-    exception ArityMismatch           of Range.t * SS.label list * int * int
-    exception TypeMismatch            of t * poly_type * poly_type
-    exception MissingImplementation   of Range.t * SS.label
-    exception NotProvidingRealization of Range.t * SS.label list * SS.label
+    exception DuplicateSpec              of Range.t * SS.label
+    exception ValueSpecMismatch          of Range.t * SS.label list * t * poly_type * poly_type
+    exception ArityMismatch              of Range.t * SS.label list * int * int
+    exception TypeMismatch               of t * poly_type * poly_type
+    exception MissingImplementation      of Range.t * SS.label
+    exception NotProvidingRealization    of Range.t * SS.label list * SS.label
+    exception UndefinedSignatureVariable of Range.t * module_name list * sig_var_name
 
     module VMap = SS.VMap
 
