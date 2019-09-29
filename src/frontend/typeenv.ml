@@ -95,7 +95,23 @@ type sigvar_to_sig_map = signature SigVarMap.t
 
 type current_address = ModuleID.t Alist.t
 
-type single_stage = var_to_vardef_map * typename_to_typedef_map * constructor_to_def_map * signature option (* * sigvar_to_sig_map *)
+type single_stage =
+  {
+    vmap : var_to_vardef_map;
+    tmap : typename_to_typedef_map;
+    cmap : constructor_to_def_map;
+    (* smap : sigvar_to_sig_map; *)
+    sopt : signature option;
+  }
+
+module SingleStage = struct
+  let empty = {
+    vmap = VarMap.empty;
+    tmap = TyNameMap.empty;
+    cmap = ConstrMap.empty;
+    sopt = None;
+  }
+end
 
 type t =
   {
@@ -118,24 +134,24 @@ let empty : t =
   {
     current_address = Alist.empty;
     name_to_id_map  = ModuleNameMap.empty;
-    main_tree       = ModuleTree.empty (VarMap.empty, TyNameMap.empty, ConstrMap.empty, None);
+    main_tree       = ModuleTree.empty SingleStage.empty;
   }
 
 
-let update_vt (vdf : var_to_vardef_map -> var_to_vardef_map) ((vdmap, tdmap, cdmap, sigopt) : single_stage) : single_stage =
-  (vdf vdmap, tdmap, cdmap, sigopt)
+let update_vt (vdf : var_to_vardef_map -> var_to_vardef_map) (stage : single_stage) : single_stage =
+  { stage with vmap = vdf stage.vmap }
 
 
-let update_td (tdf : typename_to_typedef_map -> typename_to_typedef_map) ((vdmap, tdmap, cdmap, sigopt) : single_stage) : single_stage =
-  (vdmap, tdf tdmap, cdmap, sigopt)
+let update_td (tdf : typename_to_typedef_map -> typename_to_typedef_map) (stage : single_stage) : single_stage =
+  { stage with tmap = tdf stage.tmap }
 
 
-let update_cd (cdf : constructor_to_def_map -> constructor_to_def_map) ((vdmap, tdmap, cdmap, sigopt) : single_stage) : single_stage =
-  (vdmap, tdmap, cdf cdmap, sigopt)
+let update_cd (cdf : constructor_to_def_map -> constructor_to_def_map) (stage : single_stage) : single_stage =
+  { stage with cmap = cdf stage.cmap }
 
 
-let update_so (sof : signature option -> signature option) ((vdmap, tdmap, cdmap, sigopt) : single_stage) : single_stage =
-  (vdmap, tdmap, cdmap, sof sigopt)
+let update_so (sof : signature option -> signature option) (stage : single_stage) : single_stage =
+  { stage with sopt = sof stage.sopt }
 
 
 let edit_distance s1 s2 mindist =
@@ -224,17 +240,17 @@ let find (tyenv : t) (mdlnmlst : module_name list) (varnm : var_name) (rng : Ran
     )
   in
   let addrstr = String.concat "" (List.map (fun m -> ModuleID.extract_name m ^ ".") addrlast) in  (* for debug *)
-    ModuleTree.search_backward mtr addrlst addrlast (fun (vdmap, _, _, sigopt) ->
-      match sigopt with
+    ModuleTree.search_backward mtr addrlst addrlast (fun stage ->
+      match stage.sopt with
       | None ->
           print_for_debug_variantenv ("FVD " ^ addrstr ^ varnm ^ " -> no signature"); (* for debug *)
-          VarMap.find_opt varnm vdmap
+          VarMap.find_opt varnm stage.vmap
 
       | Some(s) ->
           let module M = (val s) in
           print_for_debug_variantenv ("FVD " ^ addrstr ^ varnm ^ " -> signature found"); (* for debug *)
           M.lookup_var_opt varnm >>= fun ptysig ->
-          VarMap.find_opt varnm vdmap >>= fun (_, evid, stage) ->
+          VarMap.find_opt varnm stage.vmap >>= fun (_, evid, stage) ->
           return (ptysig, evid, stage)
     )
 
@@ -252,8 +268,8 @@ let find_candidates (tyenv : t) (mdlnmlst : module_name list) (varnm : var_name)
       | Some(mdlid) -> mdlid
     )
   in
-    get_candidates_last @@ ModuleTree.fold_backward mtr addrlst addrlast (fun acc (vdmap, _, _, sigopt) ->
-      get_candidates_cont VarMap.fold vdmap varnm acc
+    get_candidates_last @@ ModuleTree.fold_backward mtr addrlst addrlast (fun acc stage ->
+      get_candidates_cont VarMap.fold stage.vmap varnm acc
     ) (initial_candidates varnm)
 
 
@@ -264,8 +280,8 @@ let open_module (tyenv : t) (rng : Range.t) (mdlnm : module_name) =
   let addrlst = Alist.to_list tyenv.current_address in
   let mtropt =
     nmtoid |> ModuleNameMap.find_opt mdlnm >>= fun mdlid ->
-    ModuleTree.search_backward mtr addrlst [mdlid] (fun (vdmapC, tdmapC, cdmapC, sigopt) ->
-      match sigopt with
+    ModuleTree.search_backward mtr addrlst [mdlid] (fun stage ->
+      match stage.sopt with
       | Some(s) ->
         (* -- if the opened module has a signature -- *)
           let module M = (val s) in
@@ -273,7 +289,7 @@ let open_module (tyenv : t) (rng : Range.t) (mdlnm : module_name) =
           ModuleTree.update mtr addrlst (update_cd (M.fold_constr ConstrMap.add)) >>= fun mtr ->
           ModuleTree.update mtr addrlst (update_vt @@
             M.fold_var (fun varnm pty vdmapU ->
-              match vdmapC |> VarMap.find_opt varnm with
+              match stage.vmap |> VarMap.find_opt varnm with
               | None ->
                   assert false
                     (* -- signature must be less general than its corresponding implementation -- *)
@@ -285,9 +301,9 @@ let open_module (tyenv : t) (rng : Range.t) (mdlnm : module_name) =
 
       | None ->
         (* -- if the opened module does NOT have a signature -- *)
-          ModuleTree.update mtr addrlst (update_td (TyNameMap.fold TyNameMap.add tdmapC)) >>= fun mtr ->
-          ModuleTree.update mtr addrlst (update_vt (VarMap.fold VarMap.add vdmapC)) >>= fun mtr ->
-          ModuleTree.update mtr addrlst (update_cd (ConstrMap.fold ConstrMap.add cdmapC))
+          ModuleTree.update mtr addrlst (update_td (TyNameMap.fold TyNameMap.add stage.tmap)) >>= fun mtr ->
+          ModuleTree.update mtr addrlst (update_vt (VarMap.fold VarMap.add stage.vmap)) >>= fun mtr ->
+          ModuleTree.update mtr addrlst (update_cd (ConstrMap.fold ConstrMap.add stage.cmap))
     )
   in
     match mtropt with
@@ -299,8 +315,8 @@ let find_for_inner (tyenv : t) (varnm : var_name) : (poly_type * EvalVarID.t * s
   let open OptionMonad in
   let mtr = tyenv.main_tree in
   let addrlst = Alist.to_list tyenv.current_address in
-  ModuleTree.find_stage mtr addrlst >>= fun (vdmap, _, _, _) ->
-  VarMap.find_opt varnm vdmap
+  ModuleTree.find_stage mtr addrlst >>= fun stage ->
+  VarMap.find_opt varnm stage.vmap
 
 
 let enter_new_module (tyenv : t) (mdlnm : module_name) : t =
@@ -308,7 +324,7 @@ let enter_new_module (tyenv : t) (mdlnm : module_name) : t =
   let mtr = tyenv.main_tree in
   let addr = tyenv.current_address in
   let addrnew = Alist.extend addr mdlid in
-    match ModuleTree.add_stage mtr (Alist.to_list addr) mdlid (VarMap.empty, TyNameMap.empty, ConstrMap.empty, None) with
+    match ModuleTree.add_stage mtr (Alist.to_list addr) mdlid SingleStage.empty with
     | None         -> assert false
     | Some(mtrnew) -> { tyenv with current_address = addrnew; main_tree = mtrnew; }
 
@@ -384,8 +400,8 @@ let add_type_definition (tyenv : t) (tynm : type_name) ((tyid, dfn) : TypeID.t *
 let find_type_definition_for_inner (tyenv : t) (tynm : type_name) : (TypeID.t * type_definition) option =
   let addrlst = Alist.to_list tyenv.current_address in
   let mtr = tyenv.main_tree in
-    ModuleTree.search_backward mtr addrlst [] (fun (_, tdmap, _, _) ->
-      TyNameMap.find_opt tynm tdmap
+    ModuleTree.search_backward mtr addrlst [] (fun stage ->
+      TyNameMap.find_opt tynm stage.tmap
     )
 
 
@@ -401,11 +417,11 @@ let find_type_definition_for_outer (tyenv : t) (mdlnmlst : module_name list) (ty
     )
   in
   let straddr = String.concat "." (addrlst |> List.map ModuleID.extract_name) in (* for debug *)
-    ModuleTree.search_backward mtr addrlst mdlidlst (fun (_, tdmap, _, sigopt) ->
-      match sigopt with
+    ModuleTree.search_backward mtr addrlst mdlidlst (fun stage ->
+      match stage.sopt with
       | None ->
           let () = print_for_debug_variantenv ("FTD " ^ straddr ^ ", " ^ tynm ^ " -> no signature") in (* for debug *)
-          TyNameMap.find_opt tynm tdmap
+          TyNameMap.find_opt tynm stage.tmap
 
       | Some(s) ->
           let () = print_for_debug_variantenv ("FTD " ^ straddr ^ ", " ^ tynm ^ " -> signature found") in (* for debug *)
@@ -426,9 +442,9 @@ let find_type_definition_candidates_for_outer (tyenv : t) (mdlnmlst : module_nam
     )
   in
   let base_type_candidates = get_candidates_first Hashtbl.fold base_type_hash_table tynm in
-    get_candidates_last @@ ModuleTree.fold_backward mtr addrlst mdlidlst (fun acc (_, tdmap, _, sigopt) ->
-      match sigopt with
-      | None    -> get_candidates_cont TyNameMap.fold tdmap tynm acc
+    get_candidates_last @@ ModuleTree.fold_backward mtr addrlst mdlidlst (fun acc stage ->
+      match stage.sopt with
+      | None    -> get_candidates_cont TyNameMap.fold stage.tmap tynm acc
       | Some(s) ->
           let module M = (val s) in
           M.fold_type (get_candidates_cont_aux tynm) acc
@@ -736,7 +752,7 @@ let rec find_constructor (pre : pre) (tyenv : t) (constrnm : constructor_name) :
   let addrlst = Alist.to_list tyenv.current_address in
   let mtr = tyenv.main_tree in
   let open OptionMonad in
-    ModuleTree.search_backward mtr addrlst [] (fun (_, _, cdmap, _) -> ConstrMap.find_opt constrnm cdmap) >>= fun dfn ->
+    ModuleTree.search_backward mtr addrlst [] (fun stage -> ConstrMap.find_opt constrnm stage.cmap) >>= fun dfn ->
     let (tyid, (bidlist, pty)) = dfn in
     let pairlst =
       bidlist |> List.map (fun bid ->
@@ -762,14 +778,14 @@ let rec enumerate_constructors (pre : pre) (tyenv : t) (typeid : TypeID.t) : (co
   let mtr = tyenv.main_tree in
   let open OptionMonad in
   let constrs =
-    ModuleTree.search_backward mtr addrlst [] (fun (_, _, cdmap, _) ->
+    ModuleTree.search_backward mtr addrlst [] (fun stage ->
       let constrs = ConstrMap.fold (fun constrnm dfn acc ->
         let (tyid, (bidlist, pty)) = dfn in
           if TypeID.equal typeid tyid then
             (constrnm, (fun tyarglist -> instantiate_type_scheme freef orfreef (List.combine tyarglist bidlist) pty)) :: acc
           else
             acc
-        ) cdmap []
+        ) stage.cmap []
       in
       match constrs with
       | [] -> None
@@ -784,8 +800,8 @@ let rec find_constructor_candidates (pre : pre) (tyenv : t) (constrnm : construc
   let open OptionMonad in
   let addrlst = Alist.to_list tyenv.current_address in
   let mtr = tyenv.main_tree in
-    get_candidates_last @@ ModuleTree.fold_backward mtr addrlst [] (fun acc (_, _, cdmap, _) ->
-      get_candidates_cont ConstrMap.fold cdmap constrnm acc
+    get_candidates_last @@ ModuleTree.fold_backward mtr addrlst [] (fun acc stage ->
+      get_candidates_cont ConstrMap.fold stage.cmap constrnm acc
     ) (initial_candidates constrnm)
 
 
@@ -1241,16 +1257,16 @@ module ModuleInterpreter = struct
     let addr = tyenv.current_address |> Alist.to_list in
     let mtr = tyenv.main_tree in
     match ModuleTree.find_stage mtr addr with
-    | None                  -> assert false
-    | Some((vd, td, cd, _)) ->
+    | None        -> assert false
+    | Some(stage) ->
         let quantifiers = ref [] in
-        VarMap.fold (fun l (pty, _, _) -> Struct.add (SS.V, l) (SS.AtomicTerm{is_direct = SS.Indirect; ty = pty})) vd Struct.empty |>
-        ConstrMap.fold (fun l (tid, scheme) -> Struct.add (SS.C, l) (SS.AtomicConstr{var = tid; ty = scheme})) cd |>
+        VarMap.fold (fun l (pty, _, _) -> Struct.add (SS.V, l) (SS.AtomicTerm{is_direct = SS.Indirect; ty = pty})) stage.vmap Struct.empty |>
+        ConstrMap.fold (fun l (tid, scheme) -> Struct.add (SS.C, l) (SS.AtomicConstr{var = tid; ty = scheme})) stage.cmap |>
         TyNameMap.fold (fun l (tid, d) ->
           let asig = interpret_type_def (SS.T, l) tid d in
           let () = quantifiers := SS.Exist.get_quantifier asig @ (!quantifiers) in
           Struct.add (SS.T, l) (SS.Exist.get_body asig)
-          ) td |> fun m ->
+          ) stage.tmap |> fun m ->
         SS.Structure(m) |> SS.Exist.quantify (!quantifiers)
 
   let interpret_type pre tyenv mty c =
