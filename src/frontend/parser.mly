@@ -541,6 +541,7 @@ signature:
   | tok=SIGWITHMOD                          { let (rng, names, name) = tok in SigVar(rng, names, name) }
 ;
 nxsigelem:
+  | TYPE; varntdec=nxvariantdec                                 { (SigTransType(varntdec)) }
   | TYPE; tyvars=list(TYPEVAR); tytok=VAR; clst=constrnts       { let (_, tynm) = tytok in (SigType(kind_type_arguments tyvars clst, tynm)) }
   | VAL; vartok=VAR; COLON; mnty=txfunc; clst=constrnts         { let (_, varnm) = vartok in (SigValue(varnm, mnty, clst)) }
   | VAL; LPAREN; vartok=binop; RPAREN; COLON;

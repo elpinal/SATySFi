@@ -1304,7 +1304,7 @@ module ModuleInterpreter = struct
   let from_manual pre tyenv = function
     | Sig(rng, msig) ->
         let tyenv_acc = ref tyenv in
-        let f : manual_signature_content -> (Struct.key * SS.t) SS.exist = function
+        let f : manual_signature_content -> SS.t Struct.t SS.exist = function
           | SigType(args, name) ->
               let new_id = TypeID.fresh (get_moduled_type_name tyenv name) in
               let k = List.length args in
@@ -1315,18 +1315,32 @@ module ModuleInterpreter = struct
               let ty = SS.AtomicType(scheme, k) in
               let tyid = TypeID.fresh (get_moduled_type_name tyenv name) in
               let () = tyenv_acc := add_type_definition (!tyenv_acc) name (tyid, Alias(scheme)) in
-              SS.Exist.quantify1 var ((SS.T, name), ty)
+              SS.Exist.quantify1 var (Struct.singleton (SS.T, name) ty)
+          | SigTransType(mutvarntcons) ->
+              let () = tyenv_acc := add_mutual_cons (!tyenv_acc) pre.level mutvarntcons in
+              let rec elaborate_type_specs : untyped_mutual_variant_cons -> SS.t Struct.t SS.exist = function
+                | UTEndOfMutualVariant -> SS.from_body Struct.empty
+                | UTMutualSynonymCons(tyargcons, tynmrng, name, _, tailcons) ->
+                    let asig = match find_type_definition_for_inner (!tyenv_acc) name with
+                      | None         -> assert false
+                      | Some(tid, d) -> interpret_type_def (SS.T, name) tid d
+                    in
+                    SS.Exist.merge (Struct.add (SS.T, name)) asig (elaborate_type_specs tailcons)
+              in
+              elaborate_type_specs mutvarntcons
           | SigValue(name, mty, c) ->
-              ((SS.V, name), SS.AtomicTerm{is_direct = SS.Indirect; ty = interpret_type pre (!tyenv_acc) mty c}) |> SS.from_body
+              Struct.singleton (SS.V, name) (SS.AtomicTerm{is_direct = SS.Indirect; ty = interpret_type pre (!tyenv_acc) mty c}) |> SS.from_body
           | SigDirect(name, mty, c) ->
-              ((SS.V, name), SS.AtomicTerm{is_direct = SS.Direct; ty = interpret_type pre (!tyenv_acc) mty c}) |> SS.from_body
+              Struct.singleton (SS.V, name) (SS.AtomicTerm{is_direct = SS.Direct; ty = interpret_type pre (!tyenv_acc) mty c}) |> SS.from_body
         in
-        let update m (l, s) =
-          let u = function
-            | None    -> Some(s)
-            | Some(_) -> raise (DuplicateSpec(rng, l))
+        let update m new_m =
+          let u l x y = match x, y with
+            | None, None       -> None
+            | None, Some(s)    -> Some(s)
+            | Some(s), None    -> Some(s)
+            | Some(_), Some(_) -> raise (DuplicateSpec(rng, l))
           in
-          Struct.update l u m
+          Struct.merge u m new_m
         in
         let g e spec = SS.Exist.merge update e (f spec)
         in
