@@ -788,6 +788,29 @@ let rec find_constructor (pre : pre) (tyenv : t) (constrnm : constructor_name) :
       return (tyarglst, tyid, ty)
 
 
+let enumerate_constructor_names (tyenv : t) (typeid : TypeID.t) : constructor_name list =
+  let addrlst = Alist.to_list tyenv.current_address in
+  let mtr = tyenv.main_tree in
+  let open OptionMonad in
+  let constrs =
+    ModuleTree.search_backward mtr addrlst [] (fun stage ->
+      let constrs = ConstrMap.fold (fun constrnm dfn acc ->
+        let (tyid, _) = dfn in
+          if TypeID.equal typeid tyid then
+            constrnm :: acc
+          else
+            acc
+        ) stage.cmap []
+      in
+      match constrs with
+      | [] -> None
+      | _  -> Some(constrs))
+  in
+  match constrs with
+  | Some(lst) -> lst
+  | None      -> []
+
+
 let rec enumerate_constructors (pre : pre) (tyenv : t) (typeid : TypeID.t) : (constructor_name * (mono_type list -> mono_type)) list =
   let freef rng tvref =
     (rng, TypeVariable(tvref))
@@ -1257,28 +1280,32 @@ module ModuleInterpreter = struct
 
   module Struct = SS.Struct
   module VMap = SS.VMap
+  module ConstrSet = SS.ConstrSet
 
-  exception DuplicateSpec              of Range.t * SS.label
-  exception ValueSpecMismatch          of Range.t * SS.label list * t * poly_type * poly_type
-  exception ArityMismatch              of Range.t * SS.label list * int * int
-  exception TypeMismatch               of t * poly_type * poly_type
-  exception MissingImplementation      of Range.t * SS.label
-  exception NotProvidingRealization    of Range.t * SS.label list * SS.label
-  exception UndefinedSignatureVariable of Range.t * module_name list * sig_var_name
+  exception DuplicateSpec                   of Range.t * SS.label
+  exception ValueSpecMismatch               of Range.t * SS.label list * t * poly_type * poly_type
+  exception ArityMismatch                   of Range.t * SS.label list * int * int
+  exception TypeMismatch                    of Range.t * SS.label list * t * poly_type * poly_type
+  exception ConstructorMismatch             of Range.t * SS.label list * t * type_name * poly_type * poly_type
+  exception MissingImplementation           of Range.t * SS.label
+  exception NotProvidingRealization         of Range.t * SS.label list * SS.label
+  exception UndefinedSignatureVariable      of Range.t * module_name list * sig_var_name
+  exception SameConstructorForDifferentType of Range.t * SS.label list * t * TypeID.t * TypeID.t
+  exception VariantMismatch                 of Range.t * SS.label list * t * ConstrSet.t * ConstrSet.t
 
   let get_kind (ids, _) = List.length ids
 
-  let interpret_type_def (l : SS.label) tid d =
+  let interpret_type_def tyenv (l : SS.label) tid d =
     match d with
-    | Alias(scheme) -> SS.AtomicType(scheme, get_kind scheme) |> SS.from_body
+    | Alias(scheme) -> SS.AtomicType(scheme, get_kind scheme, ConstrSet.empty) |> SS.from_body
     | Data(k)       ->
         let bids = List.init k (fun _ -> BoundID.fresh UniversalKind ()) in
         let rng = Range.dummy "variant" in
         let xs = List.map (fun bid -> (Range.dummy "variant-args", TypeVariable(PolyBound(bid)))) bids in
         let ty = (rng, VariantType(xs, tid)) in
-        let scheme = (bids, Poly(ty))
-        in
-        SS.AtomicType(scheme, k) |> SS.Exist.quantify1 {v = tid; k; location = [l]}
+        let scheme = (bids, Poly(ty)) in
+        let cs = enumerate_constructor_names tyenv tid |> ConstrSet.of_list in
+        SS.AtomicType(scheme, k, cs) |> SS.Exist.quantify1 {v = tid; k; location = [l]}
 
   let from_tyenv tyenv =
     let addr = tyenv.current_address |> Alist.to_list in
@@ -1290,7 +1317,7 @@ module ModuleInterpreter = struct
         VarMap.fold (fun l (pty, _, _) -> Struct.add (SS.V, l) (SS.AtomicTerm{is_direct = SS.Indirect; ty = pty})) stage.vmap Struct.empty |>
         ConstrMap.fold (fun l (tid, scheme) -> Struct.add (SS.C, l) (SS.AtomicConstr{var = tid; ty = scheme})) stage.cmap |>
         TyNameMap.fold (fun l (tid, d) ->
-          let asig = interpret_type_def (SS.T, l) tid d in
+          let asig = interpret_type_def tyenv (SS.T, l) tid d in
           let () = quantifiers := SS.Exist.get_quantifier asig @ (!quantifiers) in
           Struct.add (SS.T, l) (SS.Exist.get_body asig)
           ) stage.tmap |>
@@ -1300,6 +1327,11 @@ module ModuleInterpreter = struct
   let interpret_type pre tyenv mty c =
     let mono = fix_manual_type_free { pre with level = Level.succ pre.level; } tyenv mty c in
     generalize pre.level mono
+
+  let find_constr (tyenv : t) (name : constructor_name) : (TypeID.t * type_scheme) option =
+    let addrlst = Alist.to_list tyenv.current_address in
+    let mtr = tyenv.main_tree in
+    ModuleTree.search_backward mtr addrlst [] (fun stage -> ConstrMap.find_opt name stage.cmap)
 
   let from_manual pre tyenv = function
     | Sig(rng, msig) ->
@@ -1312,7 +1344,7 @@ module ModuleInterpreter = struct
               let bids = List.map (fun _ -> BoundID.fresh UniversalKind ()) args in
               let xs = List.map (fun bid -> (Range.dummy "type-spec", TypeVariable(PolyBound(bid)))) bids in
               let scheme = (bids, Poly(Range.dummy "abstract-type", VariantType(xs, new_id))) in
-              let ty = SS.AtomicType(scheme, k) in
+              let ty = SS.AtomicType(scheme, k, ConstrSet.empty) in
               let tyid = TypeID.fresh (get_moduled_type_name tyenv name) in
               let () = tyenv_acc := add_type_definition (!tyenv_acc) name (tyid, Alias(scheme)) in
               SS.Exist.quantify1 var (Struct.singleton (SS.T, name) ty)
@@ -1320,12 +1352,25 @@ module ModuleInterpreter = struct
               let () = tyenv_acc := add_mutual_cons (!tyenv_acc) pre.level mutvarntcons in
               let rec elaborate_type_specs : untyped_mutual_variant_cons -> SS.t Struct.t SS.exist = function
                 | UTEndOfMutualVariant -> SS.from_body Struct.empty
-                | UTMutualSynonymCons(tyargcons, tynmrng, name, _, tailcons) ->
+                | UTMutualSynonymCons(_, _, name, _, tailcons) ->
                     let asig = match find_type_definition_for_inner (!tyenv_acc) name with
                       | None         -> assert false
-                      | Some(tid, d) -> interpret_type_def (SS.T, name) tid d
+                      | Some(tid, d) -> interpret_type_def (!tyenv_acc) (SS.T, name) tid d
                     in
                     SS.Exist.merge (Struct.add (SS.T, name)) asig (elaborate_type_specs tailcons)
+                | UTMutualVariantCons(_, _, name, utvarntcons, tailcons) ->
+                    let asig = match find_type_definition_for_inner (!tyenv_acc) name with
+                      | None         -> assert false
+                      | Some(tid, d) -> interpret_type_def (!tyenv_acc) (SS.T, name) tid d
+                    in
+                    let asig = SS.Exist.merge (Struct.add (SS.T, name)) asig (elaborate_type_specs tailcons) in
+                    let h acc (_, cname, _) =
+                      match find_constr (!tyenv_acc) cname with
+                      | None              -> assert false
+                      | Some(tid, scheme) -> Struct.add (SS.C, cname) (SS.AtomicConstr{var = tid; ty = scheme}) acc
+                    in
+                    let s = List.fold_left h Struct.empty utvarntcons in
+                    SS.Exist.map (Struct.union (fun _ _ x -> Some(x)) s) asig
               in
               elaborate_type_specs mutvarntcons
           | SigValue(name, mty, c) ->
@@ -1362,24 +1407,45 @@ module ModuleInterpreter = struct
 
   (* Checks whether 's1' is subtype of 's2'. *)
   let rec subtype_of rng location tyenv s1 s2 = match s1, s2 with
-  | SS.AtomicType((bids1, pty1), k1), SS.AtomicType((bids2, pty2), k2) ->
+  | SS.AtomicType((bids1, pty1), k1, cs1), SS.AtomicType((bids2, pty2), k2, cs2) ->
       if k1 == k2
       then
-        let freef rng tvref = (rng, TypeVariable(PolyFree(tvref))) in
-        let orfreef orviref = OptionRowVariable(PolyORFree(orviref)) in
-        let bids = List.init k1 (fun _ -> BoundID.fresh UniversalKind ()) in
-        let pairlist1 = List.map2 (fun x y -> ((Range.dummy "subtype", TypeVariable(PolyBound(x))), y)) bids bids1 in
-        let pairlist2 = List.map2 (fun x y -> ((Range.dummy "subtype", TypeVariable(PolyBound(x))), y)) bids bids2 in
-        let ty1 = instantiate_type_scheme freef orfreef pairlist1 pty1 in
-        let ty2 = instantiate_type_scheme freef orfreef pairlist2 pty2 in
-        if poly_type_equal ty1 ty2
-          then ()
-          else raise (TypeMismatch(tyenv, Poly(ty1), Poly(ty2)))
+        if ConstrSet.equal cs1 cs2 || ConstrSet.is_empty cs2
+        then
+          let freef rng tvref = (rng, TypeVariable(PolyFree(tvref))) in
+          let orfreef orviref = OptionRowVariable(PolyORFree(orviref)) in
+          let bids = List.init k1 (fun _ -> BoundID.fresh UniversalKind ()) in
+          let pairlist1 = List.map2 (fun x y -> ((Range.dummy "subtype", TypeVariable(PolyBound(x))), y)) bids bids1 in
+          let pairlist2 = List.map2 (fun x y -> ((Range.dummy "subtype", TypeVariable(PolyBound(x))), y)) bids bids2 in
+          let ty1 = instantiate_type_scheme freef orfreef pairlist1 pty1 in
+          let ty2 = instantiate_type_scheme freef orfreef pairlist2 pty2 in
+          if poly_type_equal ty1 ty2
+            then ()
+            else raise (TypeMismatch(rng, location, tyenv, Poly(ty1), Poly(ty2)))
+        else raise (VariantMismatch(rng, location, tyenv, cs1, cs2))
       else raise (ArityMismatch(rng, [], k1, k2))
   | SS.AtomicTerm{ty = p1}, SS.AtomicTerm{ty = p2} ->
       if reflects p2 p1 (* 'is_direct' is irrelevant *)
         then ()
         else raise (ValueSpecMismatch(rng, location, tyenv, p1, p2))
+  | SS.AtomicConstr{var = tid1; ty = (bids1, pty1)}, SS.AtomicConstr{var = tid2; ty = (bids2, pty2)} ->
+      if TypeID.extract_name tid1 = TypeID.extract_name tid2
+      then
+        if List.length bids1 = List.length bids2
+        then
+          let freef rng tvref = (rng, TypeVariable(PolyFree(tvref))) in
+          let orfreef orviref = OptionRowVariable(PolyORFree(orviref)) in
+          let bids = List.init (List.length bids1) (fun _ -> BoundID.fresh UniversalKind ()) in
+          let pairlist1 = List.map2 (fun x y -> ((Range.dummy "subtype", TypeVariable(PolyBound(x))), y)) bids bids1 in
+          let pairlist2 = List.map2 (fun x y -> ((Range.dummy "subtype", TypeVariable(PolyBound(x))), y)) bids bids2 in
+          let ty1 = instantiate_type_scheme freef orfreef pairlist1 pty1 in
+          let ty2 = instantiate_type_scheme freef orfreef pairlist2 pty2 in
+          if poly_type_equal ty1 ty2
+            then ()
+            else raise (ConstructorMismatch(rng, location, tyenv, TypeID.extract_name tid1, Poly(ty1), Poly(ty2)))
+        else assert false
+      else
+        raise (SameConstructorForDifferentType(rng, location, tyenv, tid1, tid2))
   | SS.Structure(s1), SS.Structure(s2) ->
       let f l ss2 =
         let ss1 =
@@ -1396,7 +1462,7 @@ module ModuleInterpreter = struct
       let f {SS.v = v; k = k2; location} =
         try
           match SS.projs s location with
-          | SS.AtomicType(scheme, k1) ->
+          | SS.AtomicType(scheme, k1, _) ->
               if k1 == k2
               then (v, scheme)
               else raise (ArityMismatch(rng, location, k1, k2))
@@ -1476,8 +1542,8 @@ module ModuleInterpreter = struct
       let lookup_type_opt name =
         try
           match proj s (T, name) with
-          | AtomicType(scheme, k) -> Some((TypeID.fresh (get_moduled_type_name tyenv name), Alias(scheme)))
-          | _                     -> assert false
+          | AtomicType(scheme, k, _) -> Some((TypeID.fresh (get_moduled_type_name tyenv name), Alias(scheme)))
+          | _                        -> assert false
         with
         | MissingLabel(_) -> None
 
@@ -1492,8 +1558,8 @@ module ModuleInterpreter = struct
       let fold_type f acc =
         let g (cl, name) s1 acc1 =
           match cl, s1 with
-          | T, AtomicType(scheme, k) -> f name (TypeID.fresh (get_moduled_type_name tyenv name), Alias(scheme)) acc1
-          | _                        -> acc1
+          | T, AtomicType(scheme, k, _) -> f name (TypeID.fresh (get_moduled_type_name tyenv name), Alias(scheme)) acc1
+          | _                           -> acc1
         in
         match s with
         | Structure(s0) -> Struct.fold g s0 acc

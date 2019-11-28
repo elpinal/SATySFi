@@ -826,9 +826,19 @@ let error_log_environment suspended =
         NormalLine("but it has " ^ string_of_int k1 ^ " type argument(s) in the concrete definition.");
       ]
 
-  | Typeenv.ModuleInterpreter.TypeMismatch(tyenv, pty1, pty2) ->
+  | Typeenv.ModuleInterpreter.TypeMismatch(rng, loc, tyenv, pty1, pty2) ->
       report_error Typechecker [
-        NormalLine("The implementation type");
+        NormalLine("at " ^ (Range.to_string rng) ^ ":");
+        NormalLine("The implementation type of '" ^ Typeenv.ModuleInterpreter.SS.show_location loc ^ "'");
+        DisplayLine(Display.string_of_poly_type tyenv pty1);
+        NormalLine("is inconsistent with the type required by the signature");
+        DisplayLine(Display.string_of_poly_type tyenv pty2);
+      ]
+
+  | Typeenv.ModuleInterpreter.ConstructorMismatch(rng, loc, tyenv, tyname, pty1, pty2) ->
+      report_error Typechecker [
+        NormalLine("at " ^ (Range.to_string rng) ^ ":");
+        NormalLine("The types for constructor '" ^ Typeenv.ModuleInterpreter.SS.show_location loc ^ "' of '" ^ tyname ^ "' are not equal.");
         DisplayLine(Display.string_of_poly_type tyenv pty1);
         NormalLine("is inconsistent with the type required by the signature");
         DisplayLine(Display.string_of_poly_type tyenv pty2);
@@ -860,6 +870,34 @@ let error_log_environment suspended =
       report_error Typechecker [
         NormalLine("at " ^ (Range.to_string rng) ^ ":");
         NormalLine("undefined signature variable '" ^ s ^ "'");
+      ]
+
+  | Typeenv.ModuleInterpreter.SameConstructorForDifferentType(rng, loc, tyenv, tid1, tid2) ->
+      let open Typeenv.ModuleInterpreter in
+      report_error Typechecker [
+        NormalLine("at " ^ (Range.to_string rng) ^ ":");
+        NormalLine("same constructor name '" ^ SS.show_location loc ^ "' is used");
+        NormalLine("in structure for type"); (* This line should be changed when higher-order functors are implemented. *)
+        DisplayLine(TypeID.extract_name tid1 ^ ",");
+        NormalLine("but in signature for type");
+        DisplayLine(TypeID.extract_name tid2 ^ ".");
+      ]
+
+  | Typeenv.ModuleInterpreter.VariantMismatch(rng, loc, tyenv, cs1, cs2) ->
+      let open Typeenv.ModuleInterpreter in
+      let rec interpose y = function
+        | []      -> []
+        | [x]     -> [x]
+        | x :: zs -> x :: y :: interpose y zs
+      in
+      let f cs = SS.ConstrSet.elements cs |> interpose " " |> List.fold_left (^) "" in
+      report_error Typechecker [
+        NormalLine("at " ^ (Range.to_string rng) ^ ":");
+        NormalLine("the sets of constructors of '" ^ SS.show_location loc ^ "' are differ");
+        NormalLine("in structure"); (* This line should be changed when higher-order functors are implemented. *)
+        DisplayLine(f cs1);
+        NormalLine("and in signature");
+        DisplayLine(f cs2);
       ]
 
   | Typechecker.ContradictionError(tyenv, ((rng1, _) as ty1), ((rng2, _) as ty2)) ->

@@ -82,12 +82,14 @@ module F(X : S) = struct
     [@@deriving eq, ord]
   end)
 
+  module ConstrSet = Set.Make(String)
+
   type direct =
     | Direct (* direct \x : ... *)
     | Indirect (* val x : ... *)
 
   type t =
-    | AtomicType of X.ty * X.kind
+    | AtomicType of X.ty * X.kind * ConstrSet.t
     | AtomicTerm of {
         is_direct : direct;
         ty : X.poly;
@@ -143,7 +145,7 @@ module F(X : S) = struct
 
     let subst subst_type subst_poly tys =
       let rec aux = function
-        | AtomicType(ty, k)             -> AtomicType(subst_type tys ty, k)
+        | AtomicType(ty, k, cs)         -> AtomicType(subst_type tys ty, k, cs)
         | AtomicTerm{is_direct; ty = p} -> AtomicTerm{is_direct; ty = subst_poly tys p}
         | AtomicConstr{var; ty}         -> AtomicConstr{var; ty = subst_type tys ty}
         | AtomicSig(asig)               -> AtomicSig(Exist.map aux asig)
