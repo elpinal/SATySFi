@@ -1305,7 +1305,7 @@ module ModuleInterpreter = struct
     | Sig(rng, msig) ->
         let tyenv_acc = ref tyenv in
         let f : manual_signature_content -> SS.t Struct.t SS.exist = function
-          | SigType(args, name) ->
+          | SigOpaqueType(args, name) ->
               let new_id = TypeID.fresh (get_moduled_type_name tyenv name) in
               let k = List.length args in
               let var = {SS.v = new_id; k ; location = [SS.T, name]} in

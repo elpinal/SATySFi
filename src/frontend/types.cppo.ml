@@ -509,10 +509,10 @@ and untyped_abstract_tree_main =
 and constraints = (var_name * manual_kind) list
 
 and manual_signature_content =
-  | SigType      of untyped_type_argument list * type_name
-  | SigTransType of untyped_mutual_variant_cons (* transparent type specification *)
-  | SigValue     of var_name * manual_type * constraints
-  | SigDirect    of var_name * manual_type * constraints
+  | SigOpaqueType of untyped_type_argument list * type_name (* opaque type specification *)
+  | SigTransType  of untyped_mutual_variant_cons (* transparent type specification *)
+  | SigValue      of var_name * manual_type * constraints
+  | SigDirect     of var_name * manual_type * constraints
 (*
   | SigModule of module_name * manual_signature
 *)
