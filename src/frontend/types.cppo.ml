@@ -513,9 +513,7 @@ and manual_signature_content =
   | SigTransType  of untyped_mutual_variant_cons (* transparent type specification *)
   | SigValue      of var_name * manual_type * constraints
   | SigDirect     of var_name * manual_type * constraints
-(*
-  | SigModule of module_name * manual_signature
-*)
+  | SigModule     of module_name * manual_signature
 
 and manual_signature =
   | Sig    of Range.t * manual_signature_content list

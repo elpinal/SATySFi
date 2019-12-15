@@ -550,6 +550,7 @@ nxsigelem:
   | VAL; vcmdtok=VERTCMD; COLON; mnty=txfunc; clst=constrnts    { let (_, csnm) = vcmdtok in (SigValue(csnm, mnty, clst)) }
   | DIRECT; hcmdtok=HORZCMD; COLON; mnty=txfunc; clst=constrnts { let (_, csnm) = hcmdtok in (SigDirect(csnm, mnty, clst)) }
   | DIRECT; vcmdtok=VERTCMD; COLON; mnty=txfunc; clst=constrnts { let (_, csnm) = vcmdtok in (SigDirect(csnm, mnty, clst)) }
+  | MODULE; tok=CONSTRUCTOR; COLON; sg=signature                { let (_, name) = tok in (SigModule(name, sg)) }
 ;
 constrnts:
   | clst=list(constrnt) { clst }
