@@ -96,6 +96,8 @@ end
 type sigvar_to_sig_map = ModuleInterpreter_.SS.ex_t SigVarMap.t
 
 module type Signature = sig
+  val signature : ModuleInterpreter_.SS.ex_t
+
   val lookup_type_opt : type_name -> (TypeID.t * type_definition) option
   val lookup_var_opt : var_name -> poly_type option
 
@@ -1307,22 +1309,46 @@ module ModuleInterpreter = struct
         let cs = enumerate_constructor_names tyenv tid |> ConstrSet.of_list in
         SS.AtomicType(scheme, k, cs) |> SS.Exist.quantify1 {v = tid; k; location = [l]}
 
-  let from_tyenv tyenv =
+  let rec from_tyenv tyenv =
     let addr = tyenv.current_address |> Alist.to_list in
     let mtr = tyenv.main_tree in
+    let quantifiers = ref [] in
+    let submodules =
+      let ids =
+        match ModuleTree.child_keys mtr addr with
+        | None      -> assert false
+        | Some(ids) -> ids
+      in
+      List.fold_left (fun acc id ->
+          let tyenv1 =
+            {
+              tyenv with
+              current_address = Alist.extend tyenv.current_address id;
+            }
+          in
+          let asig = from_tyenv tyenv1 in
+          let name = ModuleID.extract_name id in
+          let x = SS.Exist.map_with_location (Struct.singleton (SS.M, name)) (fun ls -> (SS.M, name) :: ls) asig in
+          let () = quantifiers := SS.Exist.get_quantifier x @ (!quantifiers) in
+          (* This is valid only on the assumption that later defined modules have greater ModuleID's. *)
+          Struct.union (fun _ _ v -> Some(v)) acc (SS.Exist.get_body x)
+        ) Struct.empty ids
+    in
     match ModuleTree.find_stage mtr addr with
     | None        -> assert false
     | Some(stage) ->
-        let quantifiers = ref [] in
-        VarMap.fold (fun l (pty, _, _) -> Struct.add (SS.V, l) (SS.AtomicTerm{is_direct = SS.Indirect; ty = pty})) stage.vmap Struct.empty |>
-        ConstrMap.fold (fun l (tid, scheme) -> Struct.add (SS.C, l) (SS.AtomicConstr{var = tid; ty = scheme})) stage.cmap |>
-        TyNameMap.fold (fun l (tid, d) ->
-          let asig = interpret_type_def tyenv (SS.T, l) tid d in
-          let () = quantifiers := SS.Exist.get_quantifier asig @ (!quantifiers) in
-          Struct.add (SS.T, l) (SS.Exist.get_body asig)
-          ) stage.tmap |>
-        SigVarMap.fold (fun l asig -> Struct.add (SS.S, l) (SS.AtomicSig(asig))) stage.smap |> fun m ->
-        SS.Structure(m) |> SS.Exist.quantify (!quantifiers)
+        match stage.sopt with
+        | Some(module M) -> M.signature
+        | None           ->
+          VarMap.fold (fun l (pty, _, _) -> Struct.add (SS.V, l) (SS.AtomicTerm{is_direct = SS.Indirect; ty = pty})) stage.vmap submodules |>
+          ConstrMap.fold (fun l (tid, scheme) -> Struct.add (SS.C, l) (SS.AtomicConstr{var = tid; ty = scheme})) stage.cmap |>
+          TyNameMap.fold (fun l (tid, d) ->
+            let asig = interpret_type_def tyenv (SS.T, l) tid d in
+            let () = quantifiers := SS.Exist.get_quantifier asig @ (!quantifiers) in
+            Struct.add (SS.T, l) (SS.Exist.get_body asig)
+            ) stage.tmap |>
+          SigVarMap.fold (fun l asig -> Struct.add (SS.S, l) (SS.AtomicSig(asig))) stage.smap |> fun m ->
+          SS.Structure(m) |> SS.Exist.quantify (!quantifiers)
 
   let interpret_type pre tyenv mty c =
     let mono = fix_manual_type_free { pre with level = Level.succ pre.level; } tyenv mty c in
@@ -1548,14 +1574,21 @@ module ModuleInterpreter = struct
   (* Checks whether an abstract signature matches another abstract signature, returning realization. *)
   let matches_asig rng tyenv asig1 asig2 = matches rng tyenv (SS.Exist.get_body asig1) asig2
 
-  let set_sig tyenv asig =
+  let make_signature tyenv asig =
     let open SS in
     let s = Exist.get_body asig in
+    let s0 =
+      match s with
+      | Structure(s0) -> s0
+      | _             -> assert false
+    in
     let module M = struct
+      let signature = asig
+
       let lookup_type_opt name =
         try
           match proj s (T, name) with
-          | AtomicType(scheme, k, _) -> Some((TypeID.fresh (get_moduled_type_name tyenv name), Alias(scheme)))
+          | AtomicType(scheme, _, _) -> Some((TypeID.fresh (get_moduled_type_name tyenv name), Alias(scheme)))
           | _                        -> assert false
         with
         | MissingLabel(_) -> None
@@ -1571,12 +1604,10 @@ module ModuleInterpreter = struct
       let fold_type f acc =
         let g (cl, name) s1 acc1 =
           match cl, s1 with
-          | T, AtomicType(scheme, k, _) -> f name (TypeID.fresh (get_moduled_type_name tyenv name), Alias(scheme)) acc1
+          | T, AtomicType(scheme, _, _) -> f name (TypeID.fresh (get_moduled_type_name tyenv name), Alias(scheme)) acc1
           | _                           -> acc1
         in
-        match s with
-        | Structure(s0) -> Struct.fold g s0 acc
-        | _             -> assert false
+        Struct.fold g s0 acc
 
       let fold_var f acc =
         let g (cl, str) s1 acc1 =
@@ -1584,9 +1615,7 @@ module ModuleInterpreter = struct
           | V, AtomicTerm{ty = pty} -> f str pty acc1
           | _                       -> acc1
         in
-        match s with
-        | Structure(s0) -> Struct.fold g s0 acc
-        | _             -> assert false
+        Struct.fold g s0 acc
 
       let fold_constr f acc =
         let g (cl, str) s1 acc1 =
@@ -1594,9 +1623,7 @@ module ModuleInterpreter = struct
           | C, AtomicConstr{var = tid; ty = scheme} -> f str (tid, scheme) acc1
           | _                                       -> acc1
         in
-        match s with
-        | Structure(s0) -> Struct.fold g s0 acc
-        | _             -> assert false
+        Struct.fold g s0 acc
 
       let fold_sig f acc =
         let g (cl, str) s1 acc1 =
@@ -1604,28 +1631,46 @@ module ModuleInterpreter = struct
           | S, AtomicSig(asig) -> f str asig acc1
           | _                  -> acc1
         in
-        match s with
-        | Structure(s0) -> Struct.fold g s0 acc
-        | _             -> assert false
+        Struct.fold g s0 acc
     end
     in
-    let f = function
-      | None    -> Some((module M : Signature))
-      | Some(_) -> assert false
-    in
+    (module M : Signature)
+
+  let rec set_sig tyenv asig =
+    let open SS in
+    let s = Exist.get_body asig in
+    let sign = make_signature tyenv asig in
     let addrlst = Alist.to_list tyenv.current_address in
     let mtr = tyenv.main_tree in
     let g vt =
-      let names = SS.find_direct s in
-      List.fold_left (fun acc (name, pty) x ->
-        match find_for_inner tyenv name with
-        | None                 -> assert false
-        | Some(_, evid, stage) -> VarMap.add name (pty, evid, stage) (acc x)
-        ) (fun x -> x) names vt
+      let rec aux mod_names vt1 (Tree(names, subtree)) =
+        List.fold_left (fun acc (name, pty) x ->
+          match find tyenv mod_names name (Range.dummy "set_sig") with
+          | None                 -> assert false
+          | Some(_, evid, stage) -> VarMap.add name (pty, evid, stage) (acc x)
+          ) (fun x -> x) names vt1
+        |> List.fold_left (fun acc (name, tree) x -> aux (mod_names @ [name]) x tree) (fun x -> x) subtree
+      in
+      SS.find_direct s |> aux [] vt
+    in
+    let mtr =
+      match s with
+      | Structure(s0) ->
+          Struct.fold (fun (_, name) s1 acc ->
+            match s1 with
+            | Structure(_) ->
+              begin
+                let id = ModuleNameMap.find name tyenv.name_to_id_map in
+                let tyenv0 = set_sig {tyenv with current_address = Alist.extend tyenv.current_address id} (Exist.from_body s1) in
+                tyenv0.main_tree
+              end
+            | _ -> acc
+          ) s0 mtr
+      | _ -> mtr
     in
     let open OptionMonad in
     match
-      ModuleTree.update mtr addrlst (update_so f) >>= fun mtr ->
+      ModuleTree.update mtr addrlst (update_so (fun _ -> Some(sign))) >>= fun mtr ->
       ModuleTree.update mtr [] (update_vt g)
     with
     | None         -> assert false

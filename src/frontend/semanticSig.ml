@@ -117,7 +117,10 @@ module F(X : S) = struct
     val subst : (X.ty VMap.t -> X.ty -> X.ty) ->
                 (X.ty VMap.t -> X.poly -> X.poly) -> X.ty VMap.t -> t -> t
 
-    val find_direct : t -> (string * X.poly) list
+    type tree =
+      | Tree of (string * X.poly) list * (string * tree) list
+
+    val find_direct : t -> tree
 
     exception MissingLabel of Struct.key
   end = struct
@@ -153,15 +156,19 @@ module F(X : S) = struct
       in
         aux
 
-    (* This function only works if signatures are limited to flattened ones. *)
-    let rec find_direct_aux l = function
-      | AtomicTerm{is_direct = Direct; ty} -> [(l, ty)]
-      | Structure(s)                       ->
-          let f (_, l1) s1 xs = find_direct_aux l1 s1 @ xs in
-          Struct.fold f s []
-      | _ -> []
+    type tree =
+      | Tree of (string * X.poly) list * (string * tree) list
 
-    let find_direct = find_direct_aux "<dummy>"
+    let rec find_direct = function
+      | Structure(s) ->
+          let f (cl, l) s1 (Tree(xs, ys) as t) =
+            match cl, s1 with
+            | M, _                                  -> Tree(xs, (l, find_direct s1) :: ys)
+            | V, AtomicTerm{is_direct = Direct; ty} -> Tree((l, ty) :: xs, ys)
+            | _                                     -> t
+          in
+          Struct.fold f s (Tree([], []))
+      | _ -> Tree([], [])
   end
 
   include M

@@ -12,6 +12,7 @@ module type S =
     val add_stage : 'a t -> key list -> key -> 'a -> ('a t) option
     val search_backward : 'a t -> key list -> key list -> ('a -> 'b option) -> 'b option
     val fold_backward : 'a t -> key list -> key list -> ('b -> 'a -> 'b) -> 'b -> 'b
+    val child_keys : 'a t -> key list -> key list option
   end
 
 
@@ -124,6 +125,16 @@ module Make (Key : Map.OrderedType) =
         match result with
         | None    -> acc
         | Some(x) -> x
-    
 
+
+    let rec subtree (Stage(_, imap)) addr : 'a t InternalMap.t option =
+      let open OptionMonad in
+      match addr with
+      | []        -> return imap
+      | k :: tail ->
+          InternalMap.find_opt k imap >>= fun tree -> subtree tree tail
+
+    let child_keys t addr : key list option =
+      subtree t addr
+      |> option_map (fun m -> InternalMap.bindings m |> List.map (fun (k, _) -> k))
   end
