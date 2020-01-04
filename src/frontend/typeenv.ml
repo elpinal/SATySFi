@@ -1333,9 +1333,9 @@ module ModuleInterpreter = struct
     let mtr = tyenv.main_tree in
     ModuleTree.search_backward mtr addrlst [] (fun stage -> ConstrMap.find_opt name stage.cmap)
 
-  let from_manual pre tyenv = function
+  let rec from_manual pre tyenv_acc = function
     | Sig(rng, msig) ->
-        let tyenv_acc = ref tyenv in
+        let tyenv = !tyenv_acc in
         let f : manual_signature_content -> SS.t Struct.t SS.exist = function
           | SigOpaqueType(args, name) ->
               let new_id = TypeID.fresh (get_moduled_type_name tyenv name) in
@@ -1377,6 +1377,16 @@ module ModuleInterpreter = struct
               Struct.singleton (SS.V, name) (SS.AtomicTerm{is_direct = SS.Indirect; ty = interpret_type pre (!tyenv_acc) mty c}) |> SS.from_body
           | SigDirect(name, mty, c) ->
               Struct.singleton (SS.V, name) (SS.AtomicTerm{is_direct = SS.Direct; ty = interpret_type pre (!tyenv_acc) mty c}) |> SS.from_body
+          | SigModule(name, sg) ->
+              let () = tyenv_acc := enter_new_module (!tyenv_acc) name in
+              let ret =
+                from_manual pre tyenv_acc sg
+                  |> SS.Exist.map_with_location
+                       (Struct.singleton (SS.M, name))
+                       (fun ls -> (SS.M, name) :: ls)
+              in
+              let () = tyenv_acc := leave_module (!tyenv_acc) in
+              ret
         in
         let update m new_m =
           let u l x y = match x, y with
@@ -1391,9 +1401,12 @@ module ModuleInterpreter = struct
         in
           List.fold_left g (SS.from_body Struct.empty) msig |> SS.Exist.map (fun x -> SS.Structure(x))
     | SigVar(rng, names, name) ->
-        match find_signature tyenv names name rng with
+        match find_signature (!tyenv_acc) names name rng with
         | None       -> raise (UndefinedSignatureVariable(rng, names, name))
         | Some(asig) -> asig
+
+
+  let from_manual pre tyenv = from_manual pre (ref tyenv)
 
 
   let add_signature pre tyenv name s rng =
